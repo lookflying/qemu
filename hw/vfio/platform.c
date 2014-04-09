@@ -40,7 +40,6 @@
 
 #include "vfio-common.h"
 
-#define DEBUG_VFIO
 #ifdef DEBUG_VFIO
 #define DPRINTF(fmt, ...) \
     do { fprintf(stderr, "vfio: %s: " fmt, __func__, ## __VA_ARGS__); } \
@@ -69,7 +68,9 @@ typedef struct VFIORegion {
 } VFIORegion;
 
 
-#define VFIO_INT_INTp 4
+/*
+ * The IRQ structure inspired from PCI VFIOINTx
+ */
 
 typedef struct VFIOINTp {
     QLIST_ENTRY(VFIOINTp) next;
@@ -91,9 +92,8 @@ typedef struct VFIODevice {
     int fd;
     int num_regions;
     int num_irqs;
-    int interrupt; /* type of the interrupt, might disappear */
     char *name;
-    char *compat;
+    char *compat; /* compatibility string */
     uint32_t mmap_timeout; /* mmap timeout value in ms */
     VFIORegion regions[PLATFORM_NUM_REGIONS];
     QLIST_ENTRY(VFIODevice) next;
@@ -101,9 +101,11 @@ typedef struct VFIODevice {
     QLIST_HEAD(, VFIOINTp) intp_list;
 } VFIODevice;
 
+
 /*
  * returns properties from a QEMU VFIO device such as
  * name, compatibility, num IRQs, size of the register set
+ * currently used by virt machine
  */
 void vfio_get_props(SysBusDevice *s, char **pname,
                     char **pcompat, int *pnum_irqs, size_t *psize);
@@ -117,6 +119,20 @@ void vfio_get_props(SysBusDevice *s, char **pname,
      *pnum_irqs = vdev->num_irqs;
      *psize = vdev->regions[0].size;
 }
+
+static void vfio_disable_irqindex(VFIODevice *vdev, int index)
+{
+    struct vfio_irq_set irq_set = {
+        .argsz = sizeof(irq_set),
+        .flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_TRIGGER,
+        .index = index,
+        .start = 0,
+        .count = 0,
+    };
+
+    ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, &irq_set);
+}
+
 
 
 static void vfio_unmask_intp(VFIODevice *vdev, int index)
@@ -132,12 +148,17 @@ static void vfio_unmask_intp(VFIODevice *vdev, int index)
     ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, &irq_set);
 }
 
-
+/*
+ * Checks whether the IRQ was EOI'ed. In the positive the fast path
+ * is restored (reg space is mmaped). In the negative the reg space
+ * stays as an MMIO region (ops) and the mmap timer is reprogrammed
+ * to check the same condition after mmap_timeout ms
+ */
 
 
 static void vfio_intp_mmap_enable(void *opaque)
 {
-    VFIOINTp * intp = (VFIOINTp *)opaque;
+    VFIOINTp *intp = (VFIOINTp *)opaque;
     VFIODevice *vdev = intp->vdev;
 
     if (intp->pending) {
@@ -152,6 +173,10 @@ static void vfio_intp_mmap_enable(void *opaque)
     memory_region_set_enabled(&region->mmap_mem, true);
 }
 
+
+/*
+ * The fd handler
+ */
 
 
 static void vfio_intp_interrupt(void *opaque)
@@ -176,11 +201,14 @@ static void vfio_intp_interrupt(void *opaque)
      */
 
     VFIORegion *region = &vdev->regions[0];
+
+    /* register space is unmapped to trap EOI */
     memory_region_set_enabled(&region->mmap_mem, false);
 
+    /* trigger the virtual IRQ */
     qemu_set_irq(intp->qemuirq, 1);
 
-    /* schedule the mmap timer which will restote mmap path after EOI*/
+    /* schedule the mmap timer which will restore mmap path after EOI*/
     if (intp->mmap_timeout) {
         timer_mod(intp->mmap_timer,
                   qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + intp->mmap_timeout);
@@ -200,13 +228,18 @@ static void vfio_irq_eoi(VFIODevice *vdev)
         if (intp->pending) {
             if (eoi_done) {
                 DPRINTF("several IRQ pending simultaneously: \
-                         this is not a supported case yet\n");
+                         this case is not tested yet\n");
             }
+
             DPRINTF("EOI IRQ #%d fd=%d\n",
                     intp->pin, event_notifier_get_fd(&intp->interrupt));
+
             intp->pending = false;
+
+            /* deassert the virtual IRQ and unmask physical one */
             qemu_set_irq(intp->qemuirq, 0);
             vfio_unmask_intp(vdev, intp->pin);
+
             eoi_done = true;
         }
     }
@@ -217,22 +250,6 @@ static void vfio_irq_eoi(VFIODevice *vdev)
 
 
 
-#if 0
-static void vfio_list_intp(VFIODevice *vdev)
-{
-    VFIOINTp *intp;
-    int i = 0;
-    QLIST_FOREACH(intp, &vdev->intp_list, next) {
-        DPRINTF("IRQ #%d\n", i);
-        DPRINTF("- pin = %d\n", intp->pin);
-        DPRINTF("- fd = %d\n", event_notifier_get_fd(&intp->interrupt));
-        DPRINTF("- pending = %d\n", (int)intp->pending);
-        DPRINTF("- kvm_accel = %d\n", (int)intp->kvm_accel);
-        i++;
-    }
-}
-#endif
-
 static int vfio_enable_intp(VFIODevice *vdev, unsigned int index)
 {
     struct vfio_irq_set *irq_set; /* irq structure passed to vfio kernel */
@@ -242,8 +259,6 @@ static int vfio_enable_intp(VFIODevice *vdev, unsigned int index)
     int device = vdev->fd;
     SysBusDevice *sbdev = SYS_BUS_DEVICE(vdev);
 
-    vdev->interrupt = VFIO_INT_INTp;
-
     /* allocate and populate a new VFIOINTp structure put in a queue list */
     VFIOINTp *intp = g_malloc0(sizeof(*intp));
     intp->vdev = vdev;
@@ -251,16 +266,11 @@ static int vfio_enable_intp(VFIODevice *vdev, unsigned int index)
     intp->pending = false;
     intp->mmap_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
                                     vfio_intp_mmap_enable, intp);
-    intp->mmap_timeout = 1100;
-    /* TO DO: timeout as parameter */
 
-    /* incr sysbus num_irq and sets sysbus->irqp[n] = &intp->qemuirq
-     * only the address of the qemu_irq is set here
-     */
+    /* TO DO: currently each IRQ has the same mmap timeout */
+    intp->mmap_timeout = intp->vdev->mmap_timeout;
 
     sysbus_init_irq(sbdev, &intp->qemuirq);
-
-    /* content is set in sysbus_connect_irq (currently in machine definition) */
 
     ret = event_notifier_init(&intp->interrupt, 0);
     if (ret) {
@@ -302,7 +312,7 @@ static int vfio_enable_intp(VFIODevice *vdev, unsigned int index)
     g_free(irq_set);
 
     if (ret) {
-        error_report("vfio: Error: Failed to pass Int fd to the driver: %m");
+        error_report("vfio: Error: Failed to pass IRQ fd to the driver: %m");
         qemu_set_fd_handler(*pfd, NULL, NULL, vdev);
         close(*pfd); /* TO DO : replace by event_notifier_cleanup */
         return -errno;
@@ -315,6 +325,30 @@ static int vfio_enable_intp(VFIODevice *vdev, unsigned int index)
     return 0;
 
 }
+
+
+static void vfio_disable_intp(VFIODevice *vdev)
+{
+    VFIOINTp *intp;
+    int fd;
+
+    QLIST_FOREACH(intp, &vdev->intp_list, next) {
+        fd = event_notifier_get_fd(&intp->interrupt);
+        DPRINTF("close IRQ pin=%d fd=%d\n", intp->pin, fd);
+
+        vfio_disable_irqindex(vdev, intp->pin);
+        intp->pending = false;
+        qemu_set_irq(intp->qemuirq, 0);
+
+        qemu_set_fd_handler(fd, NULL, NULL, vdev);
+        event_notifier_cleanup(&intp->interrupt);
+    }
+
+    VFIORegion *region = &vdev->regions[0];
+    memory_region_set_enabled(&region->mmap_mem, true);
+
+}
+
 
 
 
@@ -386,11 +420,11 @@ static void vfio_region_write(void *opaque, hwaddr addr,
     }
 
     if (pwrite(region->fd, &buf, size, region->fd_offset + addr) != size) {
-        error_report("(,0x%"HWADDR_PRIx", 0x%"PRIx64", %d) failed: %m",
+        error_report("(0x%"HWADDR_PRIx", 0x%"PRIx64", %d) failed: %m",
                      addr, data, size);
     }
 
-    DPRINTF("(region %d+0x%"HWADDR_PRIx", 0x%"PRIx64", %d)\n",
+    DPRINTF("(region %d, addr=0x%"HWADDR_PRIx", data= 0x%"PRIx64", %d)\n",
             region->nr, addr, data, size);
 
     vfio_irq_eoi(container_of(region, VFIODevice, regions[region->nr]));
@@ -409,7 +443,7 @@ static uint64_t vfio_region_read(void *opaque, hwaddr addr, unsigned size)
     uint64_t data = 0;
 
     if (pread(region->fd, &buf, size, region->fd_offset + addr) != size) {
-        error_report("(,0x%"HWADDR_PRIx", %d) failed: %m",
+        error_report("(0x%"HWADDR_PRIx", %d) failed: %m",
                      addr, size);
         return (uint64_t)-1;
     }
@@ -429,7 +463,7 @@ static uint64_t vfio_region_read(void *opaque, hwaddr addr, unsigned size)
         break;
     }
 
-    DPRINTF("(region %d+0x%"HWADDR_PRIx", %d) = 0x%"PRIx64"\n",
+    DPRINTF("(region %d, addr= 0x%"HWADDR_PRIx", data=%d) = 0x%"PRIx64"\n",
             region->nr, addr, size, data);
 
     vfio_irq_eoi(container_of(region, VFIODevice, regions[region->nr]));
@@ -463,6 +497,17 @@ static void vfio_map_region(VFIODevice *vdev, int nr)
         error_report("%s unsupported. Performance may be slow", name);
     }
 }
+
+
+static void vfio_unmap_region(VFIODevice *vdev, int nr)
+{
+VFIORegion *region = &vdev->regions[nr];
+memory_region_del_subregion(&region->mem, &region->mmap_mem);
+munmap(region->mmap, memory_region_size(&region->mmap_mem));
+memory_region_destroy(&region->mmap_mem);
+}
+
+
 
 static int vfio_get_device(VFIOGroup *group, const char *name,
                            struct VFIODevice *vdev)
@@ -624,8 +669,6 @@ static void vfio_platform_realize(DeviceState *dev, Error **errp)
         }
     }
 
-    DPRINTF("Calling vfio_get_device ...\n");
-
     ret = vfio_get_device(group, path, vdev);
     if (ret) {
         error_report("vfio: failed to get device %s", path);
@@ -639,10 +682,49 @@ static void vfio_platform_realize(DeviceState *dev, Error **errp)
     }
 }
 
+static void vfio_platform_reset_handler(void *opaque)
+{
+}
+
+
+static void vfio_put_device(VFIODevice *vdev)
+{
+    QLIST_REMOVE(vdev, next);
+    vdev->group = NULL;
+    DPRINTF("vfio_put_device: close vdev->fd\n");
+    close(vdev->fd);
+}
+
+static void vfio_platform_exitfn(VFIODevice *dev)
+{
+    VFIOGroup *group = dev->group;
+    VFIOINTp *intp, *next_intp;
+
+    vfio_disable_intp(dev);
+
+    QLIST_FOREACH_SAFE(intp, &dev->intp_list, next, next_intp) {
+        QLIST_REMOVE(intp, next);
+        if (intp->mmap_timer) {
+            timer_free(intp->mmap_timer);
+        }
+        g_free(intp);
+    }
+
+    vfio_unmap_region(dev, 0);
+    vfio_put_device(dev);
+    vfio_put_group(group, vfio_platform_reset_handler);
+}
+
+
 static const VMStateDescription vfio_platform_vmstate = {
     .name = TYPE_VFIO_PLATFORM,
     .unmigratable = 1,
 };
+
+typedef struct VFIOPlatformDeviceClass {
+    DeviceClass parent_class;
+    void (*exit)(VFIODevice *);
+} VFIOPlatformDeviceClass;
 
 static Property vfio_platform_dev_properties[] = {
 DEFINE_PROP_STRING("vfio_device", VFIODevice, name),
@@ -651,15 +733,20 @@ DEFINE_PROP_UINT32("mmap-timeout-ms", VFIODevice, mmap_timeout, 1100),
 DEFINE_PROP_END_OF_LIST(),
 };
 
+#define VFIO_PLATFORM_DEVICE_CLASS(klass) \
+     OBJECT_CLASS_CHECK(VFIOPlatformDeviceClass, (klass), TYPE_VFIO_PLATFORM)
+
 static void vfio_platform_dev_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    VFIOPlatformDeviceClass *vc = VFIO_PLATFORM_DEVICE_CLASS(klass);
 
     dc->realize = vfio_platform_realize;
     dc->vmsd = &vfio_platform_vmstate;
     dc->props = vfio_platform_dev_properties;
     dc->desc = "VFIO-based platform device assignment";
     dc->cannot_instantiate_with_device_add_yet = false;
+    vc->exit = vfio_platform_exitfn;
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
 }
 
