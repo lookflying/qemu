@@ -93,6 +93,7 @@ typedef struct VFIODevice {
     int num_irqs;
     int interrupt; /* type of the interrupt, might disappear */
     char *name;
+    char *compat;
     uint32_t mmap_timeout; /* mmap timeout value in ms */
     VFIORegion regions[PLATFORM_NUM_REGIONS];
     QLIST_ENTRY(VFIODevice) next;
@@ -100,6 +101,22 @@ typedef struct VFIODevice {
     QLIST_HEAD(, VFIOINTp) intp_list;
 } VFIODevice;
 
+/*
+ * returns properties from a QEMU VFIO device such as
+ * name, compatibility, num IRQs, size of the register set
+ */
+void vfio_get_props(SysBusDevice *s, char **pname,
+                    char **pcompat, int *pnum_irqs, size_t *psize);
+
+void vfio_get_props(SysBusDevice *s, char **pname,
+                    char **pcompat, int *pnum_irqs, size_t *psize) {
+
+     VFIODevice *vdev = DO_UPCAST(VFIODevice, sbdev, s);
+     *pname = vdev->name;
+     *pcompat = vdev->compat;
+     *pnum_irqs = vdev->num_irqs;
+     *psize = vdev->regions[0].size;
+}
 
 
 static void vfio_unmask_intp(VFIODevice *vdev, int index)
@@ -556,17 +573,14 @@ static void vfio_platform_realize(DeviceState *dev, Error **errp)
     struct stat st;
     int groupid, i, ret;
 
-
-    /* TODO: pass device name on command line */
-    vdev->name = malloc(PATH_MAX);
-    strcpy(vdev->name, "fff51000.ethernet");
-
     /* Check that the host device exists */
     snprintf(path, sizeof(path), "/sys/bus/platform/devices/%s/", vdev->name);
     if (stat(path, &st) < 0) {
         error_report("vfio: error: no such host device: %s", path);
         return;
     }
+
+    DPRINTF("vfio device %s, compat = %s\n", path, vdev->compat);
 
     strncat(path, "iommu_group", sizeof(path) - strlen(path) - 1);
 
@@ -596,10 +610,15 @@ static void vfio_platform_realize(DeviceState *dev, Error **errp)
     QLIST_FOREACH(pvdev, &group->device_list, next) {
         DPRINTF("compare %s versus %s\n", pvdev->name, vdev->name);
         if (strcmp(pvdev->name, vdev->name) == 0) {
-
+            /*
+             * in current implementation realize is called twice:
+             * 1) once in the virt. machine (where qdev stuff are done +
+             *    device tree generation,
+             * 2) once in vl.c (-device standard handling)
+             * on 2) realize completes here.
+             */
             DPRINTF("vfio device %s already is attached to group %d\n",
                     vdev->name, groupid);
-
             vfio_put_group(group, NULL);
             return;
         }
@@ -625,14 +644,22 @@ static const VMStateDescription vfio_platform_vmstate = {
     .unmigratable = 1,
 };
 
+static Property vfio_platform_dev_properties[] = {
+DEFINE_PROP_STRING("vfio_device", VFIODevice, name),
+DEFINE_PROP_STRING("compat", VFIODevice, compat),
+DEFINE_PROP_UINT32("mmap-timeout-ms", VFIODevice, mmap_timeout, 1100),
+DEFINE_PROP_END_OF_LIST(),
+};
+
 static void vfio_platform_dev_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = vfio_platform_realize;
     dc->vmsd = &vfio_platform_vmstate;
+    dc->props = vfio_platform_dev_properties;
     dc->desc = "VFIO-based platform device assignment";
-    dc->cannot_instantiate_with_device_add_yet = true;
+    dc->cannot_instantiate_with_device_add_yet = false;
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
 }
 

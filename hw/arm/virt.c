@@ -40,6 +40,17 @@
 #include "exec/address-spaces.h"
 #include "qemu/bitops.h"
 #include "qemu/error-report.h"
+#include "monitor/qdev.h"
+#include "qemu/config-file.h"
+
+/*
+ * this function is implemented in vfio/platform.c
+ * it returns the name, compatibility, IRQ number and register set size.
+ * the function only is implemented for VFIO platform devices
+ */
+void vfio_get_props(SysBusDevice *s, char **pname, char **pcompat,
+                    int *pnum_irqs, size_t *psize);
+
 
 #define NUM_VIRTIO_TRANSPORTS 32
 
@@ -65,7 +76,7 @@ enum {
     VIRT_GIC_CPU,
     VIRT_UART,
     VIRT_MMIO,
-    VIRT_ETHERNET,
+    VIRT_VFIO,
 };
 
 typedef struct MemMapEntry {
@@ -79,7 +90,10 @@ typedef struct VirtBoardInfo {
     const char *qdevname;
     const char *gic_compatible;
     const MemMapEntry *memmap;
+    qemu_irq pic[NUM_IRQS];
     const int *irqmap;
+    hwaddr avail_vfio_base;
+    int avail_vfio_irq;
     int smp_cpus;
     void *fdt;
     int fdt_size;
@@ -105,16 +119,16 @@ static const MemMapEntry a15memmap[] = {
     [VIRT_GIC_CPU] = { 0x8002000, 0x1000 },
     [VIRT_UART] = { 0x9000000, 0x1000 },
     [VIRT_MMIO] = { 0xa000000, 0x200 },
+    [VIRT_VFIO] = { 0xa004000, 0x0 }, /* size is dynamically populated */
     /* ...repeating for a total of NUM_VIRTIO_TRANSPORTS, each of that size */
     /* 0x10000000 .. 0x40000000 reserved for PCI */
-    [VIRT_MEM] = { 0x40000000, 1ULL * 1024 * 1024 * 1024 },
-    [VIRT_ETHERNET] = { 0xfff41000, 0x1000 },
+    [VIRT_MEM] = { 0x40000000, 30ULL * 1024 * 1024 * 1024 },
 };
 
 static const int a15irqmap[] = {
     [VIRT_UART] = 1,
     [VIRT_MMIO] = 16, /* ...to 16 + NUM_VIRTIO_TRANSPORTS - 1 */
-    [VIRT_ETHERNET] = 77,
+    [VIRT_VFIO] = 48,
 };
 
 static VirtBoardInfo machines[] = {
@@ -266,7 +280,7 @@ static void fdt_add_gic_node(const VirtBoardInfo *vbi)
     qemu_fdt_setprop_cell(vbi->fdt, "/intc", "phandle", gic_phandle);
 }
 
-static void create_uart(const VirtBoardInfo *vbi, qemu_irq *pic)
+static void create_uart(const VirtBoardInfo *vbi)
 {
     char *nodename;
     hwaddr base = vbi->memmap[VIRT_UART].base;
@@ -275,7 +289,7 @@ static void create_uart(const VirtBoardInfo *vbi, qemu_irq *pic)
     const char compat[] = "arm,pl011\0arm,primecell";
     const char clocknames[] = "uartclk\0apb_pclk";
 
-    sysbus_create_simple("pl011", base, pic[irq]);
+    sysbus_create_simple("pl011", base, vbi->pic[irq]);
 
     nodename = g_strdup_printf("/pl011@%" PRIx64, base);
     qemu_fdt_add_subnode(vbi->fdt, nodename);
@@ -294,34 +308,133 @@ static void create_uart(const VirtBoardInfo *vbi, qemu_irq *pic)
     g_free(nodename);
 }
 
-static void create_ethernet(const VirtBoardInfo *vbi, qemu_irq *pic)
+/*
+ * Function called for each vfio-platform device option found in the
+ * qemu user command line:
+ * -device vfio-platform,vfio-device="<device>",compat"<compat>"
+ * for instance <device> can be fff51000.ethernet (device unbound from
+ * original driver and bound to vfio driver)
+ * for instance <compat> can be calxeda/hb-xgmac
+ * note "/" replaces normal ",". Indeed "," would be interpreted by QEMU as
+ * a separator
+ */
+
+static int vfio_init_func(QemuOpts *opts, void *opaque)
 {
+    const char *driver;
+    DeviceState *dev;
+    SysBusDevice *s;
+    VirtBoardInfo *vbi = (VirtBoardInfo *)opaque;
+    driver = qemu_opt_get(opts, "driver");
+
+    /* index the first IRQ should be mapped */
+    int irq_start = vbi->avail_vfio_irq;
+
     char *nodename;
-    hwaddr base = vbi->memmap[VIRT_ETHERNET].base;
-    hwaddr size = vbi->memmap[VIRT_ETHERNET].size;
-    const char compat[] = "calxeda,hb-xgmac";
-    int irqm = vbi->irqmap[VIRT_ETHERNET];
-    int irqp = irqm+1;
-    int irqlp = irqm+2;
 
-    sysbus_create_varargs("vfio-platform", base,
-                          pic[irqm], pic[irqp], pic[irqlp], NULL);
+    /* this will contain the capatibility string with the "/"
+     * replaced by ","
+     */
+    char *corrected_compat;
 
-    nodename = g_strdup_printf("/ethernet@%" PRIx64, base);
-    qemu_fdt_add_subnode(vbi->fdt, nodename);
+    char **pname  = g_malloc0(sizeof(char *));
+    char **pcompat = g_malloc0(sizeof(char *));
 
-    /* Note that we can't use setprop_string because of the embedded NUL */
-    qemu_fdt_setprop(vbi->fdt, nodename, "compatible", compat, sizeof(compat));
-    qemu_fdt_setprop_sized_cells(vbi->fdt, nodename, "reg", 2, base, 2, size);
-    qemu_fdt_setprop_cells(vbi->fdt, nodename, "interrupts",
-                                0x0, irqm, 0x4,
-                                0x0, irqp, 0x4,
-                                0x0, irqlp, 0x4);
+    int num_irqs;
+    size_t size;
+    int i;
+    uint32_t *irq_attr;
 
-    g_free(nodename);
+    if (!driver) {
+        qerror_report(QERR_MISSING_PARAMETER, "driver");
+        return -1 ;
+    }
+
+    if (strcasecmp(driver, "vfio-platform") == 0) {
+        dev = qdev_device_add(opts);
+        if (!dev) {
+            return -1;
+        }
+        s = SYS_BUS_DEVICE(dev);
+
+        vfio_get_props(s, pname, pcompat, &num_irqs, &size);
+
+        if (vbi->avail_vfio_base + size >= 0x10000000) {
+            /* register space size exceeds remaining VFIO space */
+            qerror_report(QERR_DEVICE_INIT_FAILED, *pname);
+        } else if (irq_start + num_irqs >= NUM_IRQS) {
+            /* VFIO IRQ number exceeded */
+            qerror_report(QERR_DEVICE_INIT_FAILED, *pname);
+        }
+
+        /*
+         * process compatibility property string passed by end-user
+         * replaces / by ,
+         * currently a single property compatibility value is supported!
+         */
+        corrected_compat = g_strdup(*pcompat);
+        char *slash = strchr(corrected_compat, '/');
+        *slash = ',';
+
+        sysbus_mmio_map(s, 0, vbi->avail_vfio_base);
+
+        nodename = g_strdup_printf("/%s@%" PRIx64,
+                                   *pname, vbi->avail_vfio_base);
+        qemu_fdt_add_subnode(vbi->fdt, nodename);
+
+        qemu_fdt_setprop(vbi->fdt, nodename, "compatible",
+                             corrected_compat, strlen(corrected_compat));
+
+        qemu_fdt_setprop_sized_cells(vbi->fdt, nodename,
+                             "reg", 2, vbi->avail_vfio_base, 2, size);
+
+        irq_attr = g_malloc0(num_irqs*3*sizeof(uint32_t));
+        for (i = 0; i < num_irqs; i++) {
+            sysbus_connect_irq(s, i, vbi->pic[irq_start+i]);
+
+            irq_attr[3*i] = cpu_to_be32(0);
+            irq_attr[3*i+1] = cpu_to_be32(irq_start+i);
+            irq_attr[3*i+2] = cpu_to_be32(0x4);
+        }
+
+        qemu_fdt_setprop(vbi->fdt, nodename, "interrupts",
+                         irq_attr, num_irqs*3*sizeof(uint32_t));
+
+        /* increment base address and IRQ index for next VFIO device */
+        vbi->avail_vfio_base += size;
+        vbi->avail_vfio_irq += num_irqs;
+
+        g_free(pcompat);
+        g_free(pname);
+        g_free(nodename);
+        g_free(corrected_compat);
+        g_free(irq_attr);
+
+        object_unref(OBJECT(dev));
+
+    }
+
+  return 0;
 }
 
-static void create_virtio_devices(const VirtBoardInfo *vbi, qemu_irq *pic)
+/*
+ * parses the option line and look for -device option
+ * for each of time vfio_init_func is called.
+ * this later only applies to -device vfio-platform ones
+ */
+
+static void create_vfio_devices(VirtBoardInfo *vbi)
+{
+    vbi->avail_vfio_base = vbi->memmap[VIRT_VFIO].base;
+    vbi->avail_vfio_irq =  vbi->irqmap[VIRT_VFIO];
+
+    if (qemu_opts_foreach(qemu_find_opts("device"),
+                        vfio_init_func, (void *)vbi, 1) != 0)
+        exit(1);
+}
+
+
+static void create_virtio_devices(const VirtBoardInfo *vbi)
 {
     int i;
     hwaddr size = vbi->memmap[VIRT_MMIO].size;
@@ -335,7 +448,7 @@ static void create_virtio_devices(const VirtBoardInfo *vbi, qemu_irq *pic)
         int irq = vbi->irqmap[VIRT_MMIO] + i;
         hwaddr base = vbi->memmap[VIRT_MMIO].base + i * size;
 
-        sysbus_create_simple("virtio-mmio", base, pic[irq]);
+        sysbus_create_simple("virtio-mmio", base, vbi->pic[irq]);
     }
 
     for (i = NUM_VIRTIO_TRANSPORTS - 1; i >= 0; i--) {
@@ -366,7 +479,6 @@ static void *machvirt_dtb(const struct arm_boot_info *binfo, int *fdt_size)
 
 static void machvirt_init(QEMUMachineInitArgs *args)
 {
-    qemu_irq pic[NUM_IRQS];
     MemoryRegion *sysmem = get_system_memory();
     int n;
     MemoryRegion *ram = g_new(MemoryRegion, 1);
@@ -445,17 +557,19 @@ static void machvirt_init(QEMUMachineInitArgs *args)
     }
 
     for (n = 0; n < NUM_IRQS; n++) {
-        pic[n] = qdev_get_gpio_in(dev, n);
+        vbi->pic[n] = qdev_get_gpio_in(dev, n);
     }
 
-    create_uart(vbi, pic);
-    create_ethernet(vbi, pic);
+    create_uart(vbi);
+
+    /* create vfio platform devices if any are passed in command line*/
+    create_vfio_devices(vbi);
 
     /* Create mmio transports, so the user can create virtio backends
      * (which will be automatically plugged in to the transports). If
      * no backend is created the transport will just sit harmlessly idle.
      */
-    create_virtio_devices(vbi, pic);
+    create_virtio_devices(vbi);
 
     vbi->bootinfo.ram_size = args->ram_size;
     vbi->bootinfo.kernel_filename = args->kernel_filename;
