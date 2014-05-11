@@ -35,6 +35,7 @@ typedef struct VFIOContainer {
         union {
             VFIOType1 type1;
         };
+        bool has_exec_cap; /* support of exec capability by the IOMMU */
         void (*release)(struct VFIOContainer *);
     } iommu_data;
     QLIST_HEAD(, VFIOGroup) group_list;

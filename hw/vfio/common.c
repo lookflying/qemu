@@ -107,6 +107,11 @@ static int vfio_dma_map(VFIOContainer *container, hwaddr iova,
         map.flags |= VFIO_DMA_MAP_FLAG_WRITE;
     }
 
+    /* add exec flag */
+    if (container->iommu_data.has_exec_cap) {
+        map.flags |= VFIO_DMA_MAP_FLAG_EXEC;
+    }
+
     /*
      * Try the mapping, if it fails with EBUSY, unmap the region and try
      * again.  This shouldn't be necessary, but we sometimes see it in
@@ -350,6 +355,10 @@ static int vfio_connect_container(VFIOGroup *group)
             g_free(container);
             close(fd);
             return -errno;
+        }
+
+        if (ioctl(fd, VFIO_CHECK_EXTENSION, VFIO_IOMMU_PROT_EXEC)) {
+            container->iommu_data.has_exec_cap = true;
         }
 
         container->iommu_data.type1.listener = vfio_memory_listener;
