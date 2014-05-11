@@ -324,6 +324,11 @@ static int vfio_enable_intp(VFIODevice *vdev, unsigned int index)
     sysbus_init_irq(sbdev, &intp->qemuirq);
 
     ret = event_notifier_init(&intp->interrupt, 0);
+    if (!ret && (intp->interrupt.rfd != intp->interrupt.wfd)) {
+        /* event_notifier_init created a pipe instead of eventfd */
+        ret = -1;
+    }
+
     if (ret) {
         error_report("vfio: Error: event_notifier_init failed ");
         return ret;
