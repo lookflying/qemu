@@ -40,6 +40,7 @@
 
 #include "vfio-common.h"
 
+/*#define DEBUG_VFIO 1*/
 #ifdef DEBUG_VFIO
 #define DPRINTF(fmt, ...) \
     do { fprintf(stderr, "vfio: %s: " fmt, __func__, ## __VA_ARGS__); } \
@@ -56,6 +57,11 @@
 
 #define TYPE_VFIO_PLATFORM "vfio-platform"
 
+struct intclr_region {
+    hwaddr offset;
+    hwaddr size;
+};
+
 typedef struct VFIORegion {
     off_t fd_offset; /* offset of region within device fd */
     int fd; /* device fd, allows us to pass VFIORegion as opaque data */
@@ -65,6 +71,7 @@ typedef struct VFIORegion {
     size_t size;
     uint32_t flags; /* VFIO region flags (rd/wr/mmap) */
     uint8_t nr; /* cache the region number for debug */
+    struct intclr_region intclr_reg;
 } VFIORegion;
 
 
@@ -99,6 +106,8 @@ typedef struct VFIODevice {
     QLIST_ENTRY(VFIODevice) next;
     struct VFIOGroup *group;
     QLIST_HEAD(, VFIOINTp) intp_list;
+    char *intclr_region_str; /* clear interrupt region string */
+    bool has_intclr_region;
 } VFIODevice;
 
 
@@ -118,6 +127,48 @@ void vfio_get_props(SysBusDevice *s, char **pname,
      *pcompat = vdev->compat;
      *pnum_irqs = vdev->num_irqs;
      *psize = vdev->regions[0].size;
+}
+
+static int parse_clrint_string(const char *intclr_str, uint32_t *id_reg,
+                                    hwaddr *off_reg, uint64_t *size_reg)
+{
+    char *str_ptr = g_strdup(intclr_str);
+    char *idx, *off, *size;
+
+    if (strlen(intclr_str) < 5) {
+        return -1;
+    }
+
+    idx = str_ptr;
+    str_ptr = strchr(str_ptr, ';');
+    if (!str_ptr || idx == str_ptr) {
+        return -1;
+    }
+    *str_ptr = '\0';
+
+    off = ++str_ptr;
+    str_ptr = strchr(str_ptr, ';');
+    if (!str_ptr || off == str_ptr) {
+        return -1;
+    }
+    *str_ptr = '\0';
+
+    size = ++str_ptr;
+    if (!*size) {
+        return -1;
+    }
+
+    *id_reg = strtol(idx, NULL, 10);
+    *off_reg = strtol(off, NULL, 0);
+    *size_reg = strtol(size, NULL, 10);
+
+    if (errno == EINVAL || errno == ERANGE) {
+        return -1;
+    }
+
+    DPRINTF("intclr region - id: %u offset: 0x%"HWADDR_PRIx" size: %"PRIx64"\n",
+                                                *id_reg, *off_reg, *size_reg);
+    return 0;
 }
 
 static void vfio_disable_irqindex(VFIODevice *vdev, int index)
@@ -397,6 +448,8 @@ static void vfio_region_write(void *opaque, hwaddr addr,
                               uint64_t data, unsigned size)
 {
     VFIORegion *region = opaque;
+    VFIODevice *vdev = NULL;
+
     union {
         uint8_t byte;
         uint16_t word;
@@ -427,13 +480,22 @@ static void vfio_region_write(void *opaque, hwaddr addr,
     DPRINTF("(region %d, addr=0x%"HWADDR_PRIx", data= 0x%"PRIx64", %d)\n",
             region->nr, addr, data, size);
 
-    vfio_irq_eoi(container_of(region, VFIODevice, regions[region->nr]));
+    vdev = container_of(region, VFIODevice, regions[region->nr]);
+    struct intclr_region *intr = &region->intclr_reg;
+    /* If an interrupt clear region has been specified we clear the pending
+     * intterrupts only when the memory accesse is inside the region.
+     * */
+    if ((addr >= intr->offset && addr + size <= intr->offset + intr->size)
+                                            || !vdev->has_intclr_region) {
+        vfio_irq_eoi(vdev);
+    }
 
 }
 
 static uint64_t vfio_region_read(void *opaque, hwaddr addr, unsigned size)
 {
     VFIORegion *region = opaque;
+    VFIODevice *vdev = NULL;
     union {
         uint8_t byte;
         uint16_t word;
@@ -466,7 +528,10 @@ static uint64_t vfio_region_read(void *opaque, hwaddr addr, unsigned size)
     DPRINTF("(region %d, addr= 0x%"HWADDR_PRIx", data=%d) = 0x%"PRIx64"\n",
             region->nr, addr, size, data);
 
-    vfio_irq_eoi(container_of(region, VFIODevice, regions[region->nr]));
+    vdev = container_of(region, VFIODevice, regions[region->nr]);
+    if (!vdev->has_intclr_region) {
+        vfio_irq_eoi(vdev);
+    }
 
     return data;
 }
@@ -669,6 +734,17 @@ static void vfio_platform_realize(DeviceState *dev, Error **errp)
         }
     }
 
+    hwaddr intclr_off = 0;
+    uint64_t intclr_size = 0;
+    uint32_t id = 0;
+    if (vdev->intclr_region_str) {
+        ret = parse_clrint_string(vdev->intclr_region_str, &id, &intclr_off,
+                                                              &intclr_size);
+    } else {
+        ret = -1;
+    }
+    vdev->has_intclr_region = (!ret) ? true : false;
+
     ret = vfio_get_device(group, path, vdev);
     if (ret) {
         error_report("vfio: failed to get device %s", path);
@@ -678,6 +754,16 @@ static void vfio_platform_realize(DeviceState *dev, Error **errp)
 
     for (i = 0; i < vdev->num_regions; i++) {
         vfio_map_region(vdev, i);
+
+        if (id == i && vdev->has_intclr_region) {
+            struct intclr_region *intclr_reg = NULL;
+
+            intclr_reg = &(vdev->regions[i].intclr_reg);
+
+            intclr_reg->offset = intclr_off;
+            intclr_reg->size = intclr_size;
+        }
+
         sysbus_init_mmio(sbdev, &vdev->regions[i].mem);
     }
 }
@@ -729,6 +815,7 @@ typedef struct VFIOPlatformDeviceClass {
 static Property vfio_platform_dev_properties[] = {
 DEFINE_PROP_STRING("vfio_device", VFIODevice, name),
 DEFINE_PROP_STRING("compat", VFIODevice, compat),
+DEFINE_PROP_STRING("intclr-region", VFIODevice, intclr_region_str),
 DEFINE_PROP_UINT32("mmap-timeout-ms", VFIODevice, mmap_timeout, 1100),
 DEFINE_PROP_END_OF_LIST(),
 };
