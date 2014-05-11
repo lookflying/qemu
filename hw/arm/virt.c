@@ -344,6 +344,8 @@ static int vfio_init_func(QemuOpts *opts, void *opaque)
     size_t size;
     int i;
     uint32_t *irq_attr;
+    bool is_amba = false;
+    int compat_str_len;
 
     if (!driver) {
         qerror_report(QERR_MISSING_PARAMETER, "driver");
@@ -369,12 +371,31 @@ static int vfio_init_func(QemuOpts *opts, void *opaque)
 
         /*
          * process compatibility property string passed by end-user
-         * replaces / by ,
-         * currently a single property compatibility value is supported!
+         * replaces / by , and ; by NUL character
          */
         corrected_compat = g_strdup(*pcompat);
-        char *slash = strchr(corrected_compat, '/');
-        *slash = ',';
+        /*
+         * the total length of the string has to include also the last
+         * NUL char.
+         */
+        compat_str_len = strlen(corrected_compat) + 1;
+
+        char *str_ptr = corrected_compat;
+        while ((str_ptr = strchr(str_ptr, '/')) != NULL) {
+            *str_ptr = ',';
+        }
+
+        /* check if is an AMBA device */
+        str_ptr = corrected_compat;
+        if (strstr(str_ptr, "arm,primecell") != NULL) {
+            is_amba = true;
+        }
+
+        /* substitute ";" with the NUL char */
+        str_ptr = corrected_compat;
+        while ((str_ptr = strchr(str_ptr, ';')) != NULL) {
+            *str_ptr = '\0';
+        }
 
         sysbus_mmio_map(s, 0, vbi->avail_vfio_base);
 
@@ -383,10 +404,18 @@ static int vfio_init_func(QemuOpts *opts, void *opaque)
         qemu_fdt_add_subnode(vbi->fdt, nodename);
 
         qemu_fdt_setprop(vbi->fdt, nodename, "compatible",
-                             corrected_compat, strlen(corrected_compat));
+                             corrected_compat, compat_str_len);
 
         qemu_fdt_setprop_sized_cells(vbi->fdt, nodename,
                              "reg", 2, vbi->avail_vfio_base, 2, size);
+
+        if (is_amba) {
+            qemu_fdt_setprop_cells(vbi->fdt, nodename, "clocks",
+                                   vbi->clock_phandle);
+            char clock_names[] = "apb_pclk";
+            qemu_fdt_setprop(vbi->fdt, nodename, "clock-names", clock_names,
+                                                       sizeof(clock_names));
+        }
 
         irq_attr = g_malloc0(num_irqs*3*sizeof(uint32_t));
         for (i = 0; i < num_irqs; i++) {
