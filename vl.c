@@ -2356,9 +2356,34 @@ int qemu_init_main_loop(void)
 {
     return main_loop_init();
 }
+/*
+ *help function for SCHED_DEADLINE
+ */
+static struct timespec usec_to_timespec(unsigned long usec)
+{
+	struct timespec ts;
 
+	ts.tv_sec = usec / 1000000;
+	ts.tv_nsec = (usec % 1000000) * 1000;
+	
+	return ts;
+}
+
+__u64
+timespec_to_nsec(struct timespec *ts)
+{
+	return round(ts->tv_sec * 1E9 + ts->tv_nsec);
+}
 int main(int argc, char **argv, char **envp)
 {
+		/*
+		 *for SCHED_DEADLINE
+		 *
+		 */
+		char arguments[MAX_DL_ARG_LEN];
+		char* token;
+		long period, exec;
+
     int i;
     int snapshot, linux_boot;
     const char *icount_option = NULL;
@@ -2482,6 +2507,36 @@ int main(int argc, char **argv, char **envp)
                 exit(1);
             }
             switch(popt->index) {
+						case QEMU_OPTION_deadline:
+								if (strlen(optarg) >= MAX_DL_ARG_LEN)
+								{
+									printf("argument for deadline is too long.\n");
+									exit(1);
+								}
+								strncpy(arguments, optarg, strlen(optarg));
+								arguments[strlen(optarg)] = '\0';
+								token = strtok(arguments, ":");
+								period = strtol(token, NULL, 10);
+								token = strtok(NULL, ":");
+								exec = strtol(token, NULL, 10);
+
+								if (exec >= period)
+								{
+									printf("Exec time should be less than period.\n");
+									exit(1);
+								}
+
+								g_dl_period = usec_to_timespec(period);
+								g_dl_exec = usec_to_timespec(exec);
+								g_dl_attr.size = sizeof(g_dl_attr);
+								g_dl_attr.sched_flags = 0;
+								g_dl_attr.sched_policy = SCHED_DEADLINE;
+								g_dl_attr.sched_period = 0;
+								g_dl_attr.sched_runtime = timespec_to_nsec(&g_dl_exec) + (timespec_to_nsec(&g_dl_exec) / 100) * 5;
+								g_dl_attr.sched_deadline = timespec_to_nsec(&g_dl_period);
+								g_dl_attr.sched_period = timespec_to_nsec(&g_dl_period);
+								g_use_dl = 1;
+								break;
             case QEMU_OPTION_M:
                 machine = machine_parse(optarg);
                 break;
