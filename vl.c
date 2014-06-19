@@ -181,7 +181,7 @@ int main(int argc, char **argv)
 #define MAX_DL_ARG_LEN	100
 
 struct timespec g_dl_period, g_dl_exec;
-struct sched_atttr g_dl_attr;
+struct sched_attr g_dl_attr;
 int g_use_dl = 0;
 
 //#define DEBUG_NET
