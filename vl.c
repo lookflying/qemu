@@ -2372,7 +2372,7 @@ static struct timespec usec_to_timespec(unsigned long usec)
 __u64
 timespec_to_nsec(struct timespec *ts)
 {
-	return round(ts->tv_sec * 1E9 + ts->tv_nsec);
+	return ts->tv_sec * 1E9 + ts->tv_nsec;
 }
 int main(int argc, char **argv, char **envp)
 {
