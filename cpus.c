@@ -60,6 +60,25 @@
 
 #endif /* CONFIG_LINUX */
 
+#include "dl_syscall.h"
+extern struct timespec g_dl_period, g_dl_exec;
+extern struct sched_attr g_dl_attr;
+extern int g_use_dl;
+int sched_setattr(pid_t pid,
+		      const struct sched_attr *attr,
+		      unsigned int flags)
+{
+	return syscall(__NR_sched_setattr, pid, attr, flags);
+}
+
+int sched_getattr(pid_t pid,
+		      struct sched_attr *attr,
+		      unsigned int size,
+		      unsigned int flags)
+{
+	return syscall(__NR_sched_getattr, pid, attr, size, flags);
+}
+
 static CPUArchState *next_cpu;
 
 static bool cpu_thread_is_idle(CPUArchState *env)
@@ -745,6 +764,22 @@ static void *qemu_kvm_cpu_thread_fn(void *arg)
         fprintf(stderr, "kvm_init_vcpu failed: %s\n", strerror(-r));
         exit(1);
     }
+
+
+		if (g_use_dl)
+		{
+			int ret;
+			unsigned int flags = 0;
+			pid_t tid;
+			tid = qemu_get_thread_id();
+			printf("tid = %ld\n", (long)tid);
+			ret = sched_setattr(tid, &g_dl_attr, flags);
+			if (ret != 0)
+			{
+				perror("sched_setattr");
+				exit(1);
+			}
+		}
 
     qemu_kvm_init_cpu_signals(env);
 
