@@ -60,7 +60,7 @@
 
 #endif /* CONFIG_LINUX */
 
-#include "dl_syscall.h"
+#include "dl_syscalls.h"
 extern struct timespec g_dl_period, g_dl_exec;
 extern struct sched_attr g_dl_attr;
 extern int g_use_dl;
