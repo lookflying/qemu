@@ -169,6 +169,21 @@ int main(int argc, char **argv)
 
 #include "ui/qemu-spice.h"
 
+/*
+ *for SCHED_DEADLINE scheduling
+ */
+#include <sched.h>
+#include <time.h>
+#include <linux/types.h>
+#include <sys/syscall.h>
+#include "dl_syscalls.h"
+#define gettid() syscall(__NR_gettid)
+#define MAX_DL_ARG_LEN	100
+
+struct timespec g_dl_period, g_dl_exec;
+struct sched_atttr g_dl_attr;
+int g_use_dl = 0;
+
 //#define DEBUG_NET
 //#define DEBUG_SLIRP
 

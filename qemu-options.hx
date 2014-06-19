@@ -2819,6 +2819,11 @@ STEXI
 Enable FIPS 140-2 compliance mode.
 ETEXI
 
+DEF("deadline", HAS_ARG, QEMU_OPTION_deadline,
+		"-deadline period:exec\n"
+		"use linux SCHED_DEADLINE scheduling policy for vcpu thread",
+		QEMU_ARCH_ALL)
+
 HXCOMM This is the last statement. Insert new options before this line!
 STEXI
 @end table
