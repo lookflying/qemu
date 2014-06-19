@@ -2369,8 +2369,7 @@ static struct timespec usec_to_timespec(unsigned long usec)
 	return ts;
 }
 
-__u64
-timespec_to_nsec(struct timespec *ts)
+static __u64 timespec_to_nsec(struct timespec *ts)
 {
 	return ts->tv_sec * 1E9 + ts->tv_nsec;
 }
