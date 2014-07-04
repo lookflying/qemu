@@ -2824,6 +2824,11 @@ DEF("deadline", HAS_ARG, QEMU_OPTION_deadline,
 		"use linux SCHED_DEADLINE scheduling policy for vcpu thread",
 		QEMU_ARCH_ALL)
 
+DEF("mlock", 0, QEMU_OPTION_mlock,
+		"-mlock\n"
+		"lock pages in memory",
+		QEMU_ARCH_ALL)
+
 HXCOMM This is the last statement. Insert new options before this line!
 STEXI
 @end table
