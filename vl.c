@@ -179,10 +179,12 @@ int main(int argc, char **argv)
 #include "dl_syscalls.h"
 #define gettid() syscall(__NR_gettid)
 #define MAX_DL_ARG_LEN	100
+#include <sys/mman.h> /*for memlock*/
 
 struct timespec g_dl_period, g_dl_exec;
 struct sched_attr g_dl_attr;
 int g_use_dl = 0;
+int g_mlock = 0;
 
 //#define DEBUG_NET
 //#define DEBUG_SLIRP
@@ -2506,6 +2508,19 @@ int main(int argc, char **argv, char **envp)
                 exit(1);
             }
             switch(popt->index) {
+						case QEMU_OPTION_mlock:
+						{
+							int ret;
+							g_mlock = 1;
+							printf("lock pages in memory\n");
+							ret = mlockall(MCL_CURRENT | MCL_FUTURE);
+							if (ret < 0)
+							{
+								perror("mlockall");
+								exit(1);
+							}
+							break;
+						} 
 						case QEMU_OPTION_deadline:
 								if (strlen(optarg) >= MAX_DL_ARG_LEN)
 								{
