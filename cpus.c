@@ -61,6 +61,7 @@
 #endif /* CONFIG_LINUX */
 
 #include "dl_syscalls.h"
+#define QEMU_TID_FILE	"/run/qemu.tid"
 extern struct timespec g_dl_period, g_dl_exec;
 extern struct sched_attr g_dl_attr;
 extern int g_use_dl;
@@ -771,8 +772,21 @@ static void *qemu_kvm_cpu_thread_fn(void *arg)
 			int ret;
 			unsigned int flags = 0;
 			pid_t tid;
+			FILE * pFile = NULL;
 			tid = qemu_get_thread_id();
 			printf("tid = %ld\n", (long)tid);
+			pFile = fopen(QEMU_TID_FILE, "w");
+			if (pFile != NULL)
+			{
+				fprintf(pFile, "%ld\n", (long)tid);
+				fclose(pFile);
+			}
+			else
+			{	
+				perror("fopen");
+				exit(1);
+			}
+
 			ret = sched_setattr(tid, &g_dl_attr, flags);
 			if (ret != 0)
 			{
