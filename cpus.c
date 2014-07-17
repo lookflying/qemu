@@ -800,6 +800,7 @@ static void *qemu_kvm_cpu_thread_fn(void *arg)
 
 			clock_gettime(CLOCK_MONOTONIC, &t_host);
 			t_host_usec = (t_host.tv_sec * 1E9 + t_host.tv_nsec) / 1000;
+			printf("tv_sec = %lu\t tv_nsec = %ld\n", t_host.tv_sec, t_host.tv_nsec);
 			printf("host clock = %llu\n", t_host_usec);
 			pFile = fopen(QEMU_CLOCK_FILE, "w");
 			if (pFile != NULL)
