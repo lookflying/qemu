@@ -67,6 +67,8 @@
 extern struct timespec g_dl_period, g_dl_exec;
 extern struct sched_attr g_dl_attr;
 extern int g_use_dl;
+extern int g_tid_use_default;
+extern char g_tid_file[];
 int sched_setattr(pid_t pid,
 		      const struct sched_attr *attr,
 		      unsigned int flags)
@@ -779,7 +781,14 @@ static void *qemu_kvm_cpu_thread_fn(void *arg)
 			unsigned long long t_host_usec;
 			tid = qemu_get_thread_id();
 			printf("tid = %ld\n", (long)tid);
-			pFile = fopen(QEMU_TID_FILE, "w");
+			if (g_tid_use_default)
+			{
+				pFile = fopen(QEMU_TID_FILE, "w");
+			}
+			else
+			{
+				pFile = fopen(g_tid_file, "w");
+			}
 			if (pFile != NULL)
 			{
 				fprintf(pFile, "%ld\n", (long)tid);

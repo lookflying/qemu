@@ -179,13 +179,15 @@ int main(int argc, char **argv)
 #include "dl_syscalls.h"
 #define gettid() syscall(__NR_gettid)
 #define MAX_DL_ARG_LEN	100
+#define MAX_PID_FILE_NAME_LEN	256
 #include <sys/mman.h> /*for memlock*/
 
 struct timespec g_dl_period, g_dl_exec;
 struct sched_attr g_dl_attr;
 int g_use_dl = 0;
 int g_mlock = 0;
-
+int g_tid_use_default = 1;
+char g_tid_file[MAX_PID_FILE_NAME_LEN];
 //#define DEBUG_NET
 //#define DEBUG_SLIRP
 
@@ -2522,6 +2524,7 @@ int main(int argc, char **argv, char **envp)
 							break;
 						} 
 						case QEMU_OPTION_deadline:
+						{
 								if (strlen(optarg) >= MAX_DL_ARG_LEN)
 								{
 									printf("argument for deadline is too long.\n");
@@ -2551,6 +2554,19 @@ int main(int argc, char **argv, char **envp)
 								g_dl_attr.sched_period = timespec_to_nsec(&g_dl_period);
 								g_use_dl = 1;
 								break;
+						}
+						case QEMU_OPTION_tid:
+						{
+								if (strlen(optarg) >= MAX_PID_FILE_NAME_LEN)
+								{
+										printf("tid file name is too long. Maximum is %u.\n", MAX_PID_FILE_NAME_LEN);
+										exit(1);
+								}
+								strncpy(g_tid_file, optarg, strlen(optarg));
+								g_tid_file[strlen(optarg)] = '\0';
+								g_tid_use_default = 0;
+								break;
+						}
             case QEMU_OPTION_M:
                 machine = machine_parse(optarg);
                 break;

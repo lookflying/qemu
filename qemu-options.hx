@@ -2829,6 +2829,11 @@ DEF("mlock", 0, QEMU_OPTION_mlock,
 		"                lock pages in memory\n",
 		QEMU_ARCH_ALL)
 
+DEF("tid", HAS_ARG, QEMU_OPTION_tid,
+		"-tid tid_file\n"
+		"                 store realtime thread id in the tid_file, default is /run/qemu.tid",
+		QEMU_ARCH_ALL)
+
 HXCOMM This is the last statement. Insert new options before this line!
 STEXI
 @end table
