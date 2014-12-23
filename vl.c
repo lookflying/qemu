@@ -2537,9 +2537,10 @@ int main(int argc, char **argv, char **envp)
 								token = strtok(NULL, ":");
 								exec = strtol(token, NULL, 10);
 
-								if (exec >= period)
+								if (exec > period)
 								{
-									printf("Exec time should be less than period.\n");
+									//printf("Exec time should be less than period.\n");
+									printf("Exec time should not be larger than period.\n");
 									exit(1);
 								}
 
