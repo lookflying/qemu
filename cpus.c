@@ -770,35 +770,35 @@ static void *qemu_kvm_cpu_thread_fn(void *arg)
         exit(1);
     }
 
+		pid_t tid;
+		FILE * pFile = NULL;
+		tid = qemu_get_thread_id();
+		printf("tid = %ld\n", (long)tid);
+		if (g_tid_use_default)
+		{
+			pFile = fopen(QEMU_TID_FILE, "w");
+		}
+		else
+		{
+			pFile = fopen(g_tid_file, "w");
+		}
+		if (pFile != NULL)
+		{
+			fprintf(pFile, "%ld\n", (long)tid);
+			fclose(pFile);
+		}
+		else
+		{	
+			perror("fopen");
+			exit(1);
+		}
 
 		if (g_use_dl)
 		{
 			int ret;
 			unsigned int flags = 0;
-			pid_t tid;
-			FILE * pFile = NULL;
 			struct timespec t_host;
 			unsigned long long t_host_usec;
-			tid = qemu_get_thread_id();
-			printf("tid = %ld\n", (long)tid);
-			if (g_tid_use_default)
-			{
-				pFile = fopen(QEMU_TID_FILE, "w");
-			}
-			else
-			{
-				pFile = fopen(g_tid_file, "w");
-			}
-			if (pFile != NULL)
-			{
-				fprintf(pFile, "%ld\n", (long)tid);
-				fclose(pFile);
-			}
-			else
-			{	
-				perror("fopen");
-				exit(1);
-			}
 
 			ret = sched_setattr(tid, &g_dl_attr, flags);
 			if (ret != 0)
